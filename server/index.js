@@ -1,5 +1,5 @@
-// Daycation Agent v2.0 — NLP-Powered WhatsApp Booking Bot
-// Added: date parsing, guest extraction, email extraction, CS handoff, URL pre-fill
+// Daycation Agent v2.1 — Bug Fixes
+// Fixed: fuzzy search, date parsing, XML sanitization, input sanitization
 
 require("dotenv").config();
 const express = require("express");
@@ -7,21 +7,29 @@ const fs = require("fs-extra");
 const path = require("path");
 const Fuse = require("fuse.js");
 const chrono = require("chrono-node");
+const morgan = require("morgan");
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(morgan("combined"));
 
 /* ---------- LOAD TOURS ---------- */
 const toursFile = path.join(__dirname, "..", "src", "data", "tours.json");
 let TOURS = [];
-if (fs.existsSync(toursFile)) {
-  TOURS = JSON.parse(fs.readFileSync(toursFile, "utf8"));
+try {
+  if (fs.existsSync(toursFile)) {
+    TOURS = JSON.parse(fs.readFileSync(toursFile, "utf8"));
+    console.log(`Loaded ${TOURS.length} tours`);
+  }
+} catch (err) {
+  console.error("Error loading tours:", err.message);
 }
+
 const fuse = new Fuse(TOURS, {
   keys: ["ACTIVITIES"],
-  threshold: 0.35,
-  minMatchCharLength: 3
+  threshold: 0.5,
+  minMatchCharLength: 2
 });
 
 /* ---------- KEYWORDS ---------- */
@@ -39,14 +47,27 @@ const CS_KEYWORDS = ["agent", "human", "support", "help", "representative", "cal
 /* ---------- ENTITY EXTRACTION ---------- */
 function extractActivity(text) {
   const lower = text.toLowerCase();
+  
+  // Exact match first
   for (const kw of ACTIVITY_KEYWORDS) {
     if (lower.includes(kw)) return kw;
   }
-  const words = lower.split(/\W+/).filter(w => w.length > 2);
-  for (const w of words) {
-    const match = ACTIVITY_KEYWORDS.find(k => k.includes(w));
-    if (match) return match;
+  
+  // Fuzzy match with Fuse.js
+  const results = fuse.search(text);
+  if (results.length > 0) {
+    return results[0].item.ACTIVITIES;
   }
+  
+  // Word-by-word fuzzy fallback
+  const words = lower.split(/\W+/).filter(w => w.length > 2);
+  for (const word of words) {
+    const wordResults = fuse.search(word);
+    if (wordResults.length > 0) {
+      return wordResults[0].item.ACTIVITIES;
+    }
+  }
+  
   return null;
 }
 
@@ -70,25 +91,47 @@ function extractEmail(text) {
 }
 
 function extractDate(text) {
+  const lower = text.toLowerCase().replace(/\s+/g, ' ').trim();
+  const today = new Date();
+  
+  // Manual typo-tolerant checks
+  if (lower.includes('tomorrow') || lower.includes('tomrrow') || lower.includes('tomoro')) {
+    const t = new Date(today);
+    t.setDate(t.getDate() + 1);
+    return t.toISOString().split('T')[0];
+  }
+  if (lower.includes('today')) {
+    return today.toISOString().split('T')[0];
+  }
+  if (lower.includes('next week')) {
+    const t = new Date(today);
+    t.setDate(t.getDate() + 7);
+    return t.toISOString().split('T')[0];
+  }
+  
+  // chrono-node for complex dates
   const parsed = chrono.parse(text);
   if (parsed.length > 0) {
     const date = parsed[0].start.date();
     return date.toISOString().split('T')[0];
   }
+  
   return null;
 }
 
-function extractTime(text) {
-  const parsed = chrono.parse(text);
-  if (parsed.length > 0 && parsed[0].start.isCertain('hour')) {
-    const hour = parsed[0].start.get('hour');
-    const minute = parsed[0].start.get('minute') || 0;
-    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
-  }
-  return null;
+function sanitizeInput(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text.replace(/[\x00-\x1F\x7F]/g, '').substring(0, 500);
 }
 
-/* ---------- URL BUILDER ---------- */
+function sanitizeForXml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function buildPrefilledUrl(baseUrl, date, time, guests, email) {
   const params = new URLSearchParams();
   if (date) params.append('date', date);
@@ -100,28 +143,28 @@ function buildPrefilledUrl(baseUrl, date, time, guests, email) {
 }
 
 /* ---------- TEMPLATES ---------- */
-const WELCOME = `🌴 Welcome to Daycation Tours!
+const WELCOME = `Welcome to Daycation Tours!
 Discover amazing UAE experiences instantly.
 
 Just tell me what you want:
-• "desert safari tomorrow 3 pax"
-• "dhow cruise next weekend 2 people"
-• "burj khalifa today hamza@email.com"
+- "desert safari tomorrow 3 pax"
+- "dhow cruise next weekend 2 people"
+- "burj khalifa today hamza@email.com"
 
 Or send "0" for this menu.`;
 
 const RESULTS_TPL = (count, keyword, date, guests, tours) => {
-  let header = `✅ Found ${count} tours for "${keyword}"`;
+  let header = `Found ${count} tours for "${keyword}"`;
   if (date) header += ` on ${date}`;
   if (guests) header += ` for ${guests} guests`;
   header += `:\n\n`;
-  return header + tours + `\n\n🔄 Want more? Send another activity or "0" for menu.`;
+  return header + tours + `\n\nWant more? Send another activity or "0" for menu.`;
 };
 
-const NO_RESULTS_TPL = `❌ No tours found. Try: "desert safari", "dhow cruise", "burj khalifa"
+const NO_RESULTS_TPL = `No tours found. Try: "desert safari", "dhow cruise", "burj khalifa"
 Or our team will contact you soon.`;
 
-const CS_HANDOFF_TPL = `👋 Connecting you to a human agent...
+const CS_HANDOFF_TPL = `Connecting you to a human agent...
 Expected response time: under 5 minutes.
 
 Meanwhile, visit: www.daycationtour.com`;
@@ -152,9 +195,12 @@ async function saveLead(leadData) {
 
 /* ---------- WEBHOOK ---------- */
 app.post("/webhook", async (req, res) => {
-  const from = req.body?.From || "unknown";
-  const body = (req.body?.Body || "").trim();
+  const rawFrom = req.body?.From || "unknown";
+  const rawBody = (req.body?.Body || "").trim();
   const ts = new Date().toISOString();
+  
+  const from = sanitizeInput(rawFrom);
+  const body = sanitizeInput(rawBody);
   
   let reply = "";
   let answered = false;
@@ -164,10 +210,9 @@ app.post("/webhook", async (req, res) => {
   const guests = extractGuests(body);
   const email = extractEmail(body);
   const date = extractDate(body);
-  const time = extractTime(body);
   const isCS = CS_KEYWORDS.some(kw => body.toLowerCase().includes(kw));
 
-  const leadData = { ts, from, body, activity, guests, email, date, time, isCS };
+  const leadData = { ts, from, body, activity, guests, email, date, isCS };
 
   try {
     if (body.toLowerCase() === "0") {
@@ -190,8 +235,8 @@ app.post("/webhook", async (req, res) => {
         reason = "no-match";
       } else {
         const tourList = results.map(r => {
-          const url = buildPrefilledUrl(r.item.URL, date, time, guests, email);
-          return `🎯 ${r.item.ACTIVITIES}\n🔗 ${url}`;
+          const url = buildPrefilledUrl(r.item.URL, date, null, guests, email);
+          return `${r.item.ACTIVITIES}\n${url}`;
         }).join("\n\n");
         
         reply = RESULTS_TPL(results.length, activity, date, guests, tourList);
@@ -201,36 +246,40 @@ app.post("/webhook", async (req, res) => {
       }
     }
   } catch (err) {
-    reply = "⚠️ Sorry, something went wrong. Please try again.";
+    console.error("Webhook error:", err.message);
+    reply = "Sorry, something went wrong. Please try again.";
     reason = "exception";
-    console.error("Error:", err.message);
   }
 
   auditLog.unshift({
     ts, from, body: body.substring(0, 100),
     answered, reason,
-    entities: { activity, guests, email, date, time },
+    entities: { activity, guests, email, date },
     reply: reply.substring(0, 200)
   });
   
   if (auditLog.length > 100) auditLog.pop();
   await saveAudit();
 
+  const safeReply = sanitizeForXml(reply);
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-<Message>${reply.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message>
+<Message>${safeReply}</Message>
 </Response>`;
 
   res.type("text/xml").send(twiml);
 });
 
 /* ---------- ENDPOINTS ---------- */
-app.get("/health", (_req, res) => res.json({
-  status: "ok",
-  version: "2.0",
-  tours: TOURS.length,
-  uptime: process.uptime()
-}));
+app.get("/health", (_req, res) => {
+  res.json({
+    status: "ok",
+    version: "2.1",
+    tours: TOURS.length,
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
+  });
+});
 
 app.get("/audit", async (_req, res) => {
   try {
@@ -254,12 +303,13 @@ app.get("/leads", async (_req, res) => {
   }
 });
 
-/* ---------- START ---------- */
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled error:", err.message);
+  res.status(500).json({ error: "Internal server error" });
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 Daycation Agent v2.0 running on port ${PORT}`);
-  console.log(`📊 Loaded ${TOURS.length} tours`);
-  console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
-  console.log(`📈 Health: http://localhost:${PORT}/health`);
-  console.log(`📋 Audit: http://localhost:${PORT}/audit`);
+  console.log(`Daycation Agent v2.1 running on port ${PORT}`);
+  console.log(`Loaded ${TOURS.length} tours`);
 });
