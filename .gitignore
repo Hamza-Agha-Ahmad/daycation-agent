@@ -37,3 +37,5 @@ storage/*.json
 project-tree.txt
 show_tree.py
 cleanup.py
+node-installer.pkg
+*.pkg
