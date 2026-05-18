@@ -1,20 +1,16 @@
 {
   "name": "daycation-agent",
-  "version": "1.0.0",
-  "description": "",
+  "version": "2.1.1",
+  "description": "AI-powered WhatsApp booking bot",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "body-parser": "^2.2.0",
-    "cors": "^2.8.5",
-    "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "fs-extra": "^11.3.1",
-    "mongodb": "^6.19.0"
+    "fs-extra": "^11.2.0",
+    "fuse.js": "^7.1.0",
+    "chrono-node": "^2.7.8",
+    "morgan": "^1.10.1"
   }
 }
