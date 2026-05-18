@@ -1,5 +1,5 @@
-// Daycation Agent v2.1 — Bug Fixes
-// Fixed: fuzzy search, date parsing, XML sanitization, input sanitization
+// Daycation Agent v2.1.1 — XSS Fix + Full NLP Pipeline
+// Fixed: fuzzy search, date parsing, XML sanitization, input sanitization, HTML blocking
 
 require("dotenv").config();
 const express = require("express");
@@ -46,6 +46,11 @@ const CS_KEYWORDS = ["agent", "human", "support", "help", "representative", "cal
 
 /* ---------- ENTITY EXTRACTION ---------- */
 function extractActivity(text) {
+  // Block HTML/script tags
+  if (text.includes('<') || text.includes('>') || text.includes('/')) {
+    return null;
+  }
+  
   const lower = text.toLowerCase();
   
   // Exact match first
@@ -274,7 +279,7 @@ app.post("/webhook", async (req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    version: "2.1",
+    version: "2.1.1",
     tours: TOURS.length,
     uptime: process.uptime(),
     memory: process.memoryUsage()
@@ -310,6 +315,6 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Daycation Agent v2.1 running on port ${PORT}`);
+  console.log(`Daycation Agent v2.1.1 running on port ${PORT}`);
   console.log(`Loaded ${TOURS.length} tours`);
 });
