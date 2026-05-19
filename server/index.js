@@ -1,5 +1,5 @@
 // Daycation Agent v3.0.0 — LLM Integration with Google Gemini (Free)
-// Added: Smart recommendations, intent classification, lead capture for all inquiries
+// Fixed: Intent-first architecture — check intent BEFORE fuzzy search
 
 require("dotenv").config();
 const express = require("express");
@@ -45,35 +45,45 @@ const ACTIVITY_KEYWORDS = [
 
 const CS_KEYWORDS = ["agent", "human", "support", "help", "representative", "call", "talk"];
 
-const RELATED_SERVICES = [
-  'hotel', 'car', 'rent', 'taxi', 'transport', 'pickup', 'drop',
-  'restaurant', 'dinner', 'lunch', 'food', 'eat',
-  'flight', 'airport', 'fly', 'ticket',
-  'visa', 'passport', 'entry',
-  'wedding', 'birthday', 'party', 'event', 'celebration',
-  'yacht', 'helicopter', 'limo', 'luxury',
-  'photo', 'video', 'camera', 'shoot',
-  'guide', 'custom', 'private', 'personal', 'exclusive'
-];
+const RELATED_KEYWORDS = {
+  'hotel': 'hotel', 'room': 'hotel', 'stay': 'hotel',
+  'car': 'car', 'rent': 'car', 'taxi': 'car', 'transport': 'car', 'pickup': 'car', 'drop': 'car',
+  'restaurant': 'restaurant', 'dinner': 'restaurant', 'lunch': 'restaurant', 'food': 'restaurant', 'eat': 'restaurant',
+  'flight': 'flight', 'airport': 'flight', 'fly': 'flight', 'ticket': 'flight',
+  'visa': 'visa', 'passport': 'visa', 'entry': 'visa',
+  'wedding': 'event', 'birthday': 'event', 'party': 'event', 'event': 'event', 'celebration': 'event',
+  'yacht': 'luxury', 'helicopter': 'luxury', 'limo': 'luxury',
+  'photo': 'photo', 'video': 'photo', 'camera': 'photo', 'shoot': 'photo',
+  'guide': 'private', 'custom': 'private', 'private': 'private', 'personal': 'private', 'exclusive': 'private'
+};
 
 /* ---------- INTENT CLASSIFICATION ---------- */
 function classifyIntent(text) {
   const lower = text.toLowerCase();
   
-  for (const service of RELATED_SERVICES) {
-    if (lower.includes(service)) {
+  // Priority 1: CS / Complaint / Urgent
+  if (['complaint', 'refund', 'bad', 'terrible', 'angry', 'problem', 'issue', 'fraud', 'scam'].some(w => lower.includes(w))) {
+    return { type: 'URGENT' };
+  }
+  
+  if (CS_KEYWORDS.some(w => lower.includes(w))) {
+    return { type: 'CS' };
+  }
+  
+  // Priority 2: Related services (NOT our tours, but tourism-adjacent)
+  for (const [keyword, service] of Object.entries(RELATED_KEYWORDS)) {
+    if (lower.includes(keyword)) {
       return { type: 'RELATED', service: service };
     }
   }
   
-  if (['complaint', 'refund', 'bad', 'terrible', 'angry', 'problem', 'issue'].some(w => lower.includes(w))) {
-    return { type: 'URGENT' };
+  // Priority 3: Completely off-topic
+  const offTopic = ['joke', 'weather', 'news', 'politics', 'sports', 'who is', 'what is the capital', 'tell me about', 'how to'];
+  if (offTopic.some(w => lower.includes(w))) {
+    return { type: 'OFF_TOPIC' };
   }
   
-  if (['agent', 'human', 'support', 'representative', 'help'].some(w => lower.includes(w))) {
-    return { type: 'CS' };
-  }
-  
+  // Default: Tourism intent
   return { type: 'TOURISM' };
 }
 
@@ -260,14 +270,14 @@ app.post("/webhook", async (req, res) => {
   let answered = false;
   let reason = "OK";
 
+  // CHECK INTENT FIRST — before any fuzzy search
   const intent = classifyIntent(body);
-  const activity = extractActivity(body);
+
   const guests = extractGuests(body);
   const email = extractEmail(body);
   const date = extractDate(body);
-  const isCS = CS_KEYWORDS.some(kw => body.toLowerCase().includes(kw));
 
-  const leadData = { ts, from, body, activity, guests, email, date, isCS };
+  const leadData = { ts, from, body, guests, email, date };
 
   try {
     if (body.toLowerCase() === "0") {
@@ -281,7 +291,7 @@ app.post("/webhook", async (req, res) => {
       reason = "urgent-handoff";
       await saveLead({ ...leadData, type: "urgent", priority: "HIGH" });
       
-    } else if (intent.type === 'CS' || isCS) {
+    } else if (intent.type === 'CS') {
       reply = CS_HANDOFF_TPL;
       answered = true;
       reason = "cs-handoff";
@@ -299,46 +309,55 @@ app.post("/webhook", async (req, res) => {
         note: "User asked for related service — potential upsell"
       });
       
-    } else if (!activity) {
-      // Try LLM fallback
-      const llmResults = await getTourRecommendation(body, TOURS);
-      
-      if (llmResults && llmResults.length > 0) {
-        const tourList = llmResults.map(r => {
-          const url = buildPrefilledUrl(r.URL, date, null, guests, email);
-          return `${r.ACTIVITIES}\n${url}`;
-        }).join("\n\n");
-        
-        reply = `I found these for you:\n\n${tourList}\n\nWant more? Send another activity or "0" for menu.`;
-        answered = true;
-        reason = "llm-matched";
-        await saveLead({ ...leadData, type: "llm_booking", tours: llmResults.map(r => r.ACTIVITIES) });
-      } else {
-        reply = "We don't have an exact match, but our team will check if we can arrange something for you. Our representative will contact you within 24 hours.";
-        answered = true;
-        reason = "no-match-captured";
-        await saveLead({ ...leadData, type: "custom_inquiry", priority: "MEDIUM" });
-      }
+    } else if (intent.type === 'OFF_TOPIC') {
+      reply = "I'm your UAE tour assistant! I can help you book desert safaris, dhow cruises, city tours, and more. What would you like to explore?";
+      reason = "off-topic";
       
     } else {
-      // Exact match found
-      const results = fuse.search(activity).slice(0, 3);
+      // ONLY FOR TOURISM: extract entities and search
+      const activity = extractActivity(body);
       
-      if (results.length === 0) {
-        reply = "We don't have an exact match, but our team will check if we can arrange something for you. Our representative will contact you within 24 hours.";
-        answered = true;
-        reason = "no-match-captured";
-        await saveLead({ ...leadData, type: "custom_inquiry", priority: "MEDIUM" });
-      } else {
-        const tourList = results.map(r => {
-          const url = buildPrefilledUrl(r.item.URL, date, null, guests, email);
-          return `${r.item.ACTIVITIES}\n${url}`;
-        }).join("\n\n");
+      if (!activity) {
+        // Try LLM fallback
+        const llmResults = await getTourRecommendation(body, TOURS);
         
-        reply = RESULTS_TPL(results.length, activity, date, guests, tourList);
-        answered = true;
-        reason = "matched";
-        await saveLead({ ...leadData, type: "booking", tours: results.map(r => r.item.ACTIVITIES) });
+        if (llmResults && llmResults.length > 0) {
+          const tourList = llmResults.map(r => {
+            const url = buildPrefilledUrl(r.URL, date, null, guests, email);
+            return `${r.ACTIVITIES}\n${url}`;
+          }).join("\n\n");
+          
+          reply = `I found these for you:\n\n${tourList}\n\nWant more? Send another activity or "0" for menu.`;
+          answered = true;
+          reason = "llm-matched";
+          await saveLead({ ...leadData, type: "llm_booking", tours: llmResults.map(r => r.ACTIVITIES) });
+        } else {
+          reply = "We don't have an exact match, but our team will check if we can arrange something for you. Our representative will contact you within 24 hours.";
+          answered = true;
+          reason = "no-match-captured";
+          await saveLead({ ...leadData, type: "custom_inquiry", priority: "MEDIUM" });
+        }
+        
+      } else {
+        // Exact or fuzzy match found
+        const results = fuse.search(activity).slice(0, 3);
+        
+        if (results.length === 0) {
+          reply = "We don't have an exact match, but our team will check if we can arrange something for you. Our representative will contact you within 24 hours.";
+          answered = true;
+          reason = "no-match-captured";
+          await saveLead({ ...leadData, type: "custom_inquiry", priority: "MEDIUM" });
+        } else {
+          const tourList = results.map(r => {
+            const url = buildPrefilledUrl(r.item.URL, date, null, guests, email);
+            return `${r.item.ACTIVITIES}\n${url}`;
+          }).join("\n\n");
+          
+          reply = RESULTS_TPL(results.length, activity, date, guests, tourList);
+          answered = true;
+          reason = "matched";
+          await saveLead({ ...leadData, type: "booking", tours: results.map(r => r.item.ACTIVITIES) });
+        }
       }
     }
   } catch (err) {
@@ -350,7 +369,7 @@ app.post("/webhook", async (req, res) => {
   auditLog.unshift({
     ts, from, body: body.substring(0, 100),
     answered, reason,
-    entities: { activity, guests, email, date },
+    entities: { activity: extractActivity(body), guests, email, date },
     reply: reply.substring(0, 200)
   });
   
@@ -408,4 +427,4 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Daycation Agent v3.0.0 running on port ${PORT}`);
   console.log(`Loaded ${TOURS.length} tours`);
-});// redeploy
+});
