@@ -1,6 +1,6 @@
 {
   "name": "daycation-agent",
-  "version": "2.1.1",
+  "version": "3.0.0",
   "description": "AI-powered WhatsApp booking bot",
   "main": "index.js",
   "scripts": {
