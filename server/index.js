@@ -387,10 +387,18 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ---------- ENDPOINTS ---------- */
+const { execSync } = require('child_process');
+
 app.get("/health", (_req, res) => {
+  const gitHash = (() => {
+    try { return execSync('git rev-parse --short HEAD').toString().trim(); }
+    catch { return 'unknown'; }
+  })();
+  
   res.json({
     status: "ok",
-    version: "3.0.0",
+    version: "3.0.1",
+    gitHash: gitHash,
     tours: TOURS.length,
     uptime: process.uptime(),
     memory: process.memoryUsage()
