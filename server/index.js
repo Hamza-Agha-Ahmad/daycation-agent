@@ -1,4 +1,5 @@
-// Daycation Agent v3.0.0 — LLM Integration with Google Gemini (Free)
+// FORCE REDEPLOY v3.0.1
+// Daycation Agent v3.0.1 — LLM Integration with Google Gemini (Free)
 // Fixed: Intent-first architecture — check intent BEFORE fuzzy search
 
 require("dotenv").config();
@@ -425,6 +426,6 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Daycation Agent v3.0.0 running on port ${PORT}`);
+  console.log(`Daycation Agent v3.0.1 running on port ${PORT}`);
   console.log(`Loaded ${TOURS.length} tours`);
 }); 
