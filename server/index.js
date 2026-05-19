@@ -1,5 +1,5 @@
-// Daycation Agent v2.1.1 — XSS Fix + Full NLP Pipeline
-// Fixed: fuzzy search, date parsing, XML sanitization, input sanitization, HTML blocking
+// Daycation Agent v2.1.2 — XSS Fix + Full NLP Pipeline + Webhook Verification
+// Fixed: fuzzy search, date parsing, XML sanitization, input sanitization, HTML blocking, webhook GET handler
 
 require("dotenv").config();
 const express = require("express");
@@ -198,7 +198,27 @@ async function saveLead(leadData) {
   }
 }
 
-/* ---------- WEBHOOK ---------- */
+/* ============================================
+   WHATSAPP WEBHOOK VERIFICATION (GET)
+   Meta sends this when you first set up the webhook
+   ============================================ */
+app.get("/webhook", (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('🔍 Webhook verification attempt:', { mode, token: token ? '***' : 'missing', challenge });
+
+  if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
+    console.log('✅ Webhook verified successfully');
+    res.status(200).send(challenge);
+  } else {
+    console.log('❌ Webhook verification failed');
+    res.sendStatus(403);
+  }
+});
+
+/* ---------- WEBHOOK (POST) ---------- */
 app.post("/webhook", async (req, res) => {
   const rawFrom = req.body?.From || "unknown";
   const rawBody = (req.body?.Body || "").trim();
@@ -279,7 +299,7 @@ app.post("/webhook", async (req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    version: "2.1.1",
+    version: "2.1.2",
     tours: TOURS.length,
     uptime: process.uptime(),
     memory: process.memoryUsage()
@@ -315,6 +335,6 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Daycation Agent v2.1.1 running on port ${PORT}`);
+  console.log(`Daycation Agent v2.1.2 running on port ${PORT}`);
   console.log(`Loaded ${TOURS.length} tours`);
 });
