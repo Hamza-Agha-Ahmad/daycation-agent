@@ -1,5 +1,5 @@
-// Daycation Agent v2.1.2 — XSS Fix + Full NLP Pipeline + Webhook Verification
-// Fixed: fuzzy search, date parsing, XML sanitization, input sanitization, HTML blocking, webhook GET handler
+// Daycation Agent v3.0.0 — LLM Integration with Google Gemini (Free)
+// Added: Smart recommendations, intent classification, lead capture for all inquiries
 
 require("dotenv").config();
 const express = require("express");
@@ -8,6 +8,7 @@ const path = require("path");
 const Fuse = require("fuse.js");
 const chrono = require("chrono-node");
 const morgan = require("morgan");
+const { getTourRecommendation } = require('./llm');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -44,27 +45,55 @@ const ACTIVITY_KEYWORDS = [
 
 const CS_KEYWORDS = ["agent", "human", "support", "help", "representative", "call", "talk"];
 
+const RELATED_SERVICES = [
+  'hotel', 'car', 'rent', 'taxi', 'transport', 'pickup', 'drop',
+  'restaurant', 'dinner', 'lunch', 'food', 'eat',
+  'flight', 'airport', 'fly', 'ticket',
+  'visa', 'passport', 'entry',
+  'wedding', 'birthday', 'party', 'event', 'celebration',
+  'yacht', 'helicopter', 'limo', 'luxury',
+  'photo', 'video', 'camera', 'shoot',
+  'guide', 'custom', 'private', 'personal', 'exclusive'
+];
+
+/* ---------- INTENT CLASSIFICATION ---------- */
+function classifyIntent(text) {
+  const lower = text.toLowerCase();
+  
+  for (const service of RELATED_SERVICES) {
+    if (lower.includes(service)) {
+      return { type: 'RELATED', service: service };
+    }
+  }
+  
+  if (['complaint', 'refund', 'bad', 'terrible', 'angry', 'problem', 'issue'].some(w => lower.includes(w))) {
+    return { type: 'URGENT' };
+  }
+  
+  if (['agent', 'human', 'support', 'representative', 'help'].some(w => lower.includes(w))) {
+    return { type: 'CS' };
+  }
+  
+  return { type: 'TOURISM' };
+}
+
 /* ---------- ENTITY EXTRACTION ---------- */
 function extractActivity(text) {
-  // Block HTML/script tags
   if (text.includes('<') || text.includes('>') || text.includes('/')) {
     return null;
   }
   
   const lower = text.toLowerCase();
   
-  // Exact match first
   for (const kw of ACTIVITY_KEYWORDS) {
     if (lower.includes(kw)) return kw;
   }
   
-  // Fuzzy match with Fuse.js
   const results = fuse.search(text);
   if (results.length > 0) {
     return results[0].item.ACTIVITIES;
   }
   
-  // Word-by-word fuzzy fallback
   const words = lower.split(/\W+/).filter(w => w.length > 2);
   for (const word of words) {
     const wordResults = fuse.search(word);
@@ -99,7 +128,6 @@ function extractDate(text) {
   const lower = text.toLowerCase().replace(/\s+/g, ' ').trim();
   const today = new Date();
   
-  // Manual typo-tolerant checks
   if (lower.includes('tomorrow') || lower.includes('tomrrow') || lower.includes('tomoro')) {
     const t = new Date(today);
     t.setDate(t.getDate() + 1);
@@ -114,7 +142,6 @@ function extractDate(text) {
     return t.toISOString().split('T')[0];
   }
   
-  // chrono-node for complex dates
   const parsed = chrono.parse(text);
   if (parsed.length > 0) {
     const date = parsed[0].start.date();
@@ -174,6 +201,9 @@ Expected response time: under 5 minutes.
 
 Meanwhile, visit: www.daycationtour.com`;
 
+const OFF_TOPIC_CAPTURE_TPL = (service) => 
+`We don't offer ${service} directly, but our team will check if we can arrange something related for you. Our representative will contact you within 24 hours.`;
+
 /* ---------- AUDIT & STORAGE ---------- */
 const auditLog = [];
 const AUDIT_FILE = path.join(__dirname, "..", "storage", "audit.json");
@@ -200,7 +230,6 @@ async function saveLead(leadData) {
 
 /* ============================================
    WHATSAPP WEBHOOK VERIFICATION (GET)
-   Meta sends this when you first set up the webhook
    ============================================ */
 app.get("/webhook", (req, res) => {
   const mode = req.query['hub.mode'];
@@ -231,6 +260,7 @@ app.post("/webhook", async (req, res) => {
   let answered = false;
   let reason = "OK";
 
+  const intent = classifyIntent(body);
   const activity = extractActivity(body);
   const guests = extractGuests(body);
   const email = extractEmail(body);
@@ -244,20 +274,61 @@ app.post("/webhook", async (req, res) => {
       reply = WELCOME;
       answered = true;
       reason = "menu";
-    } else if (isCS) {
+      
+    } else if (intent.type === 'URGENT') {
+      reply = "I understand this is important. Connecting you to our team immediately...";
+      answered = true;
+      reason = "urgent-handoff";
+      await saveLead({ ...leadData, type: "urgent", priority: "HIGH" });
+      
+    } else if (intent.type === 'CS' || isCS) {
       reply = CS_HANDOFF_TPL;
       answered = true;
       reason = "cs-handoff";
       await saveLead({ ...leadData, type: "cs_request" });
+      
+    } else if (intent.type === 'RELATED') {
+      reply = OFF_TOPIC_CAPTURE_TPL(intent.service);
+      answered = true;
+      reason = "lead-captured";
+      await saveLead({ 
+        ...leadData, 
+        type: "related_inquiry", 
+        service: intent.service,
+        priority: "MEDIUM",
+        note: "User asked for related service — potential upsell"
+      });
+      
     } else if (!activity) {
-      reply = NO_RESULTS_TPL;
-      reason = "no-activity";
+      // Try LLM fallback
+      const llmResults = await getTourRecommendation(body, TOURS);
+      
+      if (llmResults && llmResults.length > 0) {
+        const tourList = llmResults.map(r => {
+          const url = buildPrefilledUrl(r.URL, date, null, guests, email);
+          return `${r.ACTIVITIES}\n${url}`;
+        }).join("\n\n");
+        
+        reply = `I found these for you:\n\n${tourList}\n\nWant more? Send another activity or "0" for menu.`;
+        answered = true;
+        reason = "llm-matched";
+        await saveLead({ ...leadData, type: "llm_booking", tours: llmResults.map(r => r.ACTIVITIES) });
+      } else {
+        reply = "We don't have an exact match, but our team will check if we can arrange something for you. Our representative will contact you within 24 hours.";
+        answered = true;
+        reason = "no-match-captured";
+        await saveLead({ ...leadData, type: "custom_inquiry", priority: "MEDIUM" });
+      }
+      
     } else {
+      // Exact match found
       const results = fuse.search(activity).slice(0, 3);
       
       if (results.length === 0) {
-        reply = NO_RESULTS_TPL;
-        reason = "no-match";
+        reply = "We don't have an exact match, but our team will check if we can arrange something for you. Our representative will contact you within 24 hours.";
+        answered = true;
+        reason = "no-match-captured";
+        await saveLead({ ...leadData, type: "custom_inquiry", priority: "MEDIUM" });
       } else {
         const tourList = results.map(r => {
           const url = buildPrefilledUrl(r.item.URL, date, null, guests, email);
@@ -267,12 +338,12 @@ app.post("/webhook", async (req, res) => {
         reply = RESULTS_TPL(results.length, activity, date, guests, tourList);
         answered = true;
         reason = "matched";
-        await saveLead({ ...leadData, type: "booking_inquiry", tours: results.map(r => r.item.ACTIVITIES) });
+        await saveLead({ ...leadData, type: "booking", tours: results.map(r => r.item.ACTIVITIES) });
       }
     }
   } catch (err) {
     console.error("Webhook error:", err.message);
-    reply = "Sorry, something went wrong. Please try again.";
+    reply = "Sorry, something went wrong. Our team will contact you shortly.";
     reason = "exception";
   }
 
@@ -299,7 +370,7 @@ app.post("/webhook", async (req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    version: "2.1.2",
+    version: "3.0.0",
     tours: TOURS.length,
     uptime: process.uptime(),
     memory: process.memoryUsage()
@@ -335,6 +406,6 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Daycation Agent v2.1.2 running on port ${PORT}`);
+  console.log(`Daycation Agent v3.0.0 running on port ${PORT}`);
   console.log(`Loaded ${TOURS.length} tours`);
-});// Redeploy trigger
+});

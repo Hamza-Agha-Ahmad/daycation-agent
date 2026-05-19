@@ -39,3 +39,4 @@ show_tree.py
 cleanup.py
 node-installer.pkg
 *.pkg
+.env.local
